@@ -28,6 +28,61 @@
 #include <netinet/if_ether.h>
 #include <sys/ioctl.h>
 
+#include <time.h>
+#include <sys/time.h>
+#include <stdarg.h>
+
+#define LOG_PATH "/var/log/sigma_tcp"
+//#define LOG_TO_FILE
+
+void simple_log(const char *str, ...)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+
+    struct tm *today = localtime(&tv.tv_sec);
+    char time_buf[20] = {0};
+    strftime(time_buf, sizeof(time_buf), "%d.%m.%Y %H:%M:%S", today);
+
+    char ms_buf[20] = {0};
+    sprintf(ms_buf, "%06ld", tv.tv_usec);
+
+    va_list ap;
+    va_start(ap, str);
+    printf("%s.%s ", time_buf, ms_buf);
+    vprintf(str, ap);
+    printf("\n");
+    va_end(ap);
+
+#ifdef LOG_TO_FILE
+    va_start(ap, str);
+    FILE *fp = fopen(LOG_PATH, "a+");
+    if (fp) {
+        fprintf(fp, "%s.%s ", time_buf, ms_buf);
+        vfprintf(fp, str, ap);
+        fprintf(fp, "\n");
+        fclose(fp);
+    }
+    va_end(ap);
+#endif
+}
+
+char *to_hex(uint8_t *data, int len)
+{
+	static char hex[512];
+	memset(hex, 0, sizeof(hex));
+
+	if (len >= (sizeof(hex) / 2)) {
+		sprintf(hex, "[%d bytes]", len);
+		return hex;
+	}
+
+	for (int i = 0; i < len; ++i)
+		sprintf(hex + i * 2, "%02X", data[i]);
+	return hex;
+}
+
+
 static void addr_to_str(const struct sockaddr *sa, char *s, size_t maxlen)
 {
 	switch(sa->sa_family) {
@@ -81,7 +136,8 @@ static int show_addrs(int sck)
 }
 
 #define COMMAND_READ 0x0a
-#define COMMAND_WRITE 0x0b
+#define COMMAND_READ_RESPONSE 0x0b
+#define COMMAND_WRITE 0x09
 
 static uint8_t debug_data[256];
 
@@ -135,7 +191,7 @@ static void handle_connection(int fd)
 	uint8_t *p;
 	unsigned int len;
 	unsigned int addr;
-/*	unsigned int total_len;*/
+	unsigned int total_len;
 	int count, ret;
 	char command;
 
@@ -160,22 +216,43 @@ static void handle_connection(int fd)
 
 		count += ret;
 
-		while (count >= 7) {
-			command = p[0];
-/*			total_len = (p[1] << 8) | p[2];*/
-			len = (p[4] << 8) | p[5];
-			addr = (p[6] << 8) | p[7];
+		// Print received bytes
+		simple_log("Recv %02d bytes: %s", ret, to_hex(p, ret));
+
+		// Message header is 8 bytes
+		while (count >= 8) {
+			command = p[0]; // read or write
+			total_len = (p[1] << 8) | p[2]; // total message length
+			len = (p[4] << 8) | p[5]; // how many bytes to read
+			addr = (p[6] << 8) | p[7]; // address
+			int chip_addr = p[3]; // probably chip address
 
 			if (command == COMMAND_READ) {
+				simple_log("Read command: 0x%02X, total_len: %d, chip_addr: 0x%02X, len: %d, addr: 0x%04X", command, total_len, chip_addr, len, addr);
+
+				int response_len = 4 + len;
+				uint8_t *response = malloc(response_len);
+
+				// Read data
+				int read_res = backend_ops->read(addr, len, response + 4);
+				if (read_res < 0)
+					simple_log("Failed to read: %d errno: %d", read_res, errno);
+				//simple_log("Read result: %d data: %s", read_res, to_hex(response + 4, len));
+
+				// Send response
+				response[0] = COMMAND_READ_RESPONSE;
+				response[1] = response_len >> 8;
+				response[2] = response_len & 0xff;
+				response[3] = read_res >= 0 ? 0 : 1; // Probably read result: 0 - success, 1 - failure
+				write(fd, response, response_len);
+				simple_log("Sent %02d bytes: %s", response_len, to_hex(response, response_len));
+				free(response);
+
+				// Move on to the next command
 				p += 8;
 				count -= 8;
 
-				buf[0] = COMMAND_WRITE;
-				buf[1] = (0x4 + len) >> 8;
-				buf[2] = (0x4 + len) & 0xff;
-				buf[3] = backend_ops->read(addr, len, buf + 4);
-				write(fd, buf, 4 + len);
-			} else {
+			} else if (command == COMMAND_WRITE) {
 				/* not enough data, fetch next bytes */
 				if (count < len + 8) {
 					if (buf_size < len + 8) {
@@ -186,9 +263,21 @@ static void handle_connection(int fd)
 					}
 					break;
 				}
-				backend_ops->write(addr, len, p + 8);
+
+				simple_log("Write command: 0x%02X, total_len: %d, chip_addr: 0x%02X, len: %d, addr: 0x%04X, data: %s", command, total_len, chip_addr, len, addr, to_hex(p + 8, len));
+
+				// Write data
+				int write_res = backend_ops->write(addr, len, p + 8);
+				if (write_res < 0)
+					simple_log("Failed to write: %d errno: %d", write_res, errno);
+
+				// Move on to the next command
 				p += len + 8;
 				count -= len + 8;
+			}
+			else {
+				simple_log("Unknown command!");
+				abort();
 			}
 		}
 	}
@@ -289,9 +378,9 @@ int main(int argc, char *argv[])
             get_in_addr((struct sockaddr *)&their_addr),
             s, sizeof s);
 
-        printf("New connection from %s\n", s);
+        simple_log("New connection from %s", s);
 		handle_connection(new_fd);
-        printf("Connection closed\n");
+        simple_log("Connection closed");
     }
 
     return 0;

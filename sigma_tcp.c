@@ -201,23 +201,24 @@ static void handle_connection(int fd)
 	buf = malloc(buf_size);
 	if (!buf)
 		goto exit;
-
 	p = buf;
 
 	while (1) {
 		memmove(buf, p, count);
-		p = buf + count;
 
-		ret = read(fd, p, buf_size - count);
+		if (buf_size <= count) {
+			buf_size += 256;
+			buf = realloc(buf, buf_size);
+		}
+
+		ret = read(fd, buf + count, buf_size - count);
 		if (ret <= 0)
 			break;
+		simple_log("Recv %d bytes: %s", ret, to_hex(buf + count, ret));
 
 		p = buf;
-
 		count += ret;
-
-		// Print received bytes
-		simple_log("Recv %02d bytes: %s", ret, to_hex(p, ret));
+		//simple_log("Buf (count %d): %s", count, to_hex(buf, count));
 
 		// Message header is 8 bytes
 		while (count >= 8) {
@@ -253,11 +254,15 @@ static void handle_connection(int fd)
 				count -= 8;
 
 			} else if (command == COMMAND_WRITE) {
-				/* not enough data, fetch next bytes */
+				// Not enough data, fetch next bytes
 				if (count < len + 8) {
+					// Buffer is not large enough, reallocate
 					if (buf_size < len + 8) {
+						// Move unprocessed bytes to the front because the p pointer will no longer be valid after realloc
+						memmove(buf, p, count);
 						buf_size = len + 8;
 						buf = realloc(buf, buf_size);
+						p = buf;
 						if (!buf)
 							goto exit;
 					}
@@ -272,12 +277,24 @@ static void handle_connection(int fd)
 					simple_log("Failed to write: %d errno: %d", write_res, errno);
 
 				// Move on to the next command
-				p += len + 8;
-				count -= len + 8;
+				p += (len + 8);
+				count -= (len + 8);
+			}
+			else if (command == 0x1B) {
+				// This command is sent when the Register ASAP connection button is pressed in SigmaStudio
+				simple_log("ASAP command: 0x%02X, total_len: %d, chip_addr: 0x%02X, len: %d, addr: 0x%04X, data: %s", command, total_len, chip_addr, len, addr, to_hex(p + 8, len));
+
+				// Move on to the next command
+				p += (len + 8);
+				count -= (len + 8);
 			}
 			else {
-				simple_log("Unknown command!");
-				abort();
+				simple_log("Unknown command: 0x%02X!", command);
+				//abort();
+
+				// Move on to the next command
+				p += (len + 8);
+				count -= (len + 8);
 			}
 		}
 	}

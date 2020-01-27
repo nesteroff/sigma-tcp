@@ -194,6 +194,7 @@ static void handle_connection(int fd)
 	unsigned int total_len;
 	int count, ret;
 	char command;
+	int dsp_reloading = 0;
 
 	count = 0;
 
@@ -271,10 +272,36 @@ static void handle_connection(int fd)
 
 				simple_log("Write command: 0x%02X, total_len: %d, chip_addr: 0x%02X, len: %d, addr: 0x%04X, data: %s", command, total_len, chip_addr, len, addr, to_hex(p + 8, len));
 
-				// Write data
-				int write_res = backend_ops->write(addr, len, p + 8);
-				if (write_res < 0)
-					simple_log("Failed to write: %d errno: %d", write_res, errno);
+				// Detect DSP reload from SigmaStudio (see ADAU1761 datasheet, page 45, STARTUP)
+				if (addr == 0x40F6) { // 0x40F6 - DSP run
+					if (p[8] == 0) {
+						simple_log("SigmaDSP core is being reloaded (DSP run is set to 0)");
+						dsp_reloading = 1;
+					}
+					else {
+						simple_log("SigmaDSP core reloaded (DSP run is set to 1)");
+						dsp_reloading = 0;
+					}
+				}
+
+				// Don't allow to change sound settings when reloading DSP
+				int dont_write = 0;
+				if (dsp_reloading) {
+					// 0x0000 - Parameter RAM
+					// 0x0800 - Program RAM
+					// 0x40EB - DSP sampling rate setting
+					if ((addr != 0x0000) && (addr != 0x0800) && (addr != 0x40EB)) {
+						dont_write = 1;
+						simple_log("Attempt to write 0x%04X is ignored (DSP is being reloaded), len: %d", addr, len);
+					}
+				}
+
+				if (!dont_write) {
+					// Write data
+					int write_res = backend_ops->write(addr, len, p + 8);
+					if (write_res < 0)
+						simple_log("Failed to write: %d errno: %d", write_res, errno);
+				}
 
 				// Move on to the next command
 				p += (len + 8);

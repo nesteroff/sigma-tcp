@@ -184,6 +184,9 @@ static void *get_in_addr(struct sockaddr *sa)
 	return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
+void clear_ram();
+void dump_ram();
+
 static void handle_connection(int fd)
 {
 	uint8_t *buf;
@@ -277,10 +280,12 @@ static void handle_connection(int fd)
 					if (p[8] == 0) {
 						simple_log("SigmaDSP core is being reloaded (DSP run is set to 0)");
 						dsp_reloading = 1;
+						//clear_ram();
 					}
 					else {
 						simple_log("SigmaDSP core reloaded (DSP run is set to 1)");
 						dsp_reloading = 0;
+						//dump_ram();
 					}
 				}
 
@@ -330,6 +335,150 @@ exit:
 	free(buf);
 }
 
+void clear_ram()
+{
+	// 0x0000 - Parameter RAM
+	uint8_t param_ram[4096];
+	memset(param_ram, 0, 4096);
+	int read_res = backend_ops->write(0x0000, 4096, param_ram);
+	if (read_res < 0)
+		simple_log("Failed to write parameter RAM");
+
+	// 0x0800 - Program RAM
+	uint8_t program_ram[5120];
+	memset(program_ram, 0, 5120);
+	read_res = backend_ops->write(0x0800, 5120, program_ram);
+	if (read_res < 0)
+		simple_log("Failed to write program RAM");
+}
+
+void dump_ram()
+{
+	// 0x0000 - Parameter RAM
+	uint8_t param_ram[4096];
+	memset(param_ram, 0, 4096);
+	int read_res = backend_ops->read(0x0000, 4096, param_ram);
+	if (read_res < 0)
+		simple_log("Failed to read parameter RAM");
+	else {
+		FILE *fp = fopen("/adau_param_ram-read", "w+");
+		if (fp) {
+		    fwrite(param_ram, 1, 4096, fp);
+		    fclose(fp);
+		}
+	}
+
+	// 0x0800 - Program RAM
+	uint8_t program_ram[5120];
+	memset(program_ram, 0, 5120);
+	read_res = backend_ops->read(0x0800, 5120, program_ram);
+	if (read_res < 0)
+		simple_log("Failed to read program RAM");
+	else {
+		FILE *fp = fopen("/adau_program_ram-read", "w+");
+		if (fp) {
+		    fwrite(program_ram, 1, 5120, fp);
+		    fclose(fp);
+		}
+	}
+}
+
+void write_ram()
+{
+	// 0x0000 - Parameter RAM
+	uint8_t param_ram[4096];
+	memset(param_ram, 0, 4096);
+	FILE *fp = fopen("/adau_param_ram", "r+");
+	if (fp) {
+	    fread(param_ram, 1, 4096, fp);
+		int res = backend_ops->write(0x0000, 4096, param_ram);
+		if (res < 0)
+			simple_log("Failed to write parameter RAM");
+	    fclose(fp);
+	}
+	else
+		simple_log("Failed to read parameter RAM");
+
+	// 0x0800 - Program RAM
+	uint8_t program_ram[5120];
+	memset(program_ram, 0, 5120);
+	fp = fopen("/adau_program_ram", "r+");
+	if (fp) {
+	    fread(program_ram, 1, 5120, fp);
+	    int res = backend_ops->write(0x0800, 5120, program_ram);
+		if (res < 0)
+			simple_log("Failed to write program RAM");
+	    fclose(fp);
+	}
+	else
+		simple_log("Failed to read program RAM");
+}
+
+void read_register(int addr, int len, char *name, FILE *fp)
+{
+	uint8_t data[10];
+	memset(data, 0,10);
+	int res = backend_ops->read(addr, len, data);
+	if (res < 0)
+		simple_log("Failed to read 0x%02X", addr);
+	else {
+		fprintf(fp, "0x%02X ", addr);
+		for (int i = 0; i < len; ++i)
+			fprintf(fp, "%02X", data[i]);
+		fprintf(fp, " %s\n", name);
+	}
+}
+
+void dump_registers()
+{
+	// Mute
+	//uint8_t data[1];
+	//data[0] = 0x1;
+	//backend_ops->write(0x4023, 1, data);
+	//backend_ops->write(0x4024, 1, data);
+
+	FILE *fp = fopen("/adau_registers", "w+");
+	if (fp) {
+		read_register(0x4000, 1, "Clock control", fp);
+		read_register(0x4002, 6, "PLL control", fp);
+
+		for (int i = 0x4008; i <= 0x4031; ++i)
+			read_register(i, 1, "", fp);
+
+		read_register(0x4036, 1, "Dejitter control", fp);
+		read_register(0x40C0, 1, "CRC0", fp);
+		read_register(0x40C1, 1, "CRC1", fp);
+		read_register(0x40C2, 1, "CRC2", fp);
+		read_register(0x40C3, 1, "CRC3", fp);
+		read_register(0x40C4, 1, "CRC enable", fp);
+		read_register(0x40C6, 1, "GPIO0", fp);
+		read_register(0x40C7, 1, "GPIO1", fp);
+		read_register(0x40C8, 1, "GPIO2", fp);
+		read_register(0x40C9, 1, "GPIO3", fp);
+		read_register(0x40D0, 1, "Watchdog enable", fp);
+		read_register(0x40D1, 1, "Watchdog value0", fp);
+		read_register(0x40D2, 1, "Watchdog value1", fp);
+		read_register(0x40D3, 1, "Watchdog value2", fp);
+		read_register(0x40D4, 1, "Watchdog error", fp);
+
+		read_register(0x40EB, 1, "DSP sampling rate", fp);
+		read_register(0x40F2, 1, "Serial input route control", fp);
+		read_register(0x40F3, 1, "Serial output route control", fp);
+		read_register(0x40F4, 1, "Serial data/GPIO", fp);
+
+		read_register(0x40F5, 1, "DSP enable", fp);
+		read_register(0x40F6, 1, "DSP run", fp);
+		read_register(0x40F7, 1, "DSP slew modes", fp);
+		read_register(0x40F8, 1, "Serial port sampling rate", fp);
+		read_register(0x40F9, 1, "Clock enable 0", fp);
+		read_register(0x40FA, 1, "Clock enable 1", fp);
+
+	    fclose(fp);
+	}
+	else
+		simple_log("Failed to write adau registers");
+}
+
 int main(int argc, char *argv[])
 {
     int sockfd, new_fd;
@@ -361,6 +510,12 @@ int main(int argc, char *argv[])
 		if (ret)
 			exit(1);
 	}
+
+	//clear_ram();
+	//dump_ram();
+	//write_ram();
+	//dump_ram();
+	//dump_registers();
 
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;
